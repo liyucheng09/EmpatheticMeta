@@ -11,9 +11,12 @@ class OpinionMiner:
     Lexicon based opinion mining engine.
     """
 
-    def __init__(self, ):
+    def __init__(self, merge_noun_chunks = True, left = True):
         self.nlp = spacy.load("en_core_web_sm")
+        if merge_noun_chunks:
+            self.nlp.add_pipe("merge_noun_chunks")
         self._load_opinion_lexicon()
+        self.left = left
     
     def _load_opinion_lexicon(self):
         negative_path = 'data/opinion_lexicon/negative-words.txt'
@@ -44,7 +47,7 @@ class OpinionMiner:
 
         return
     
-    def syntax_iterators(self, doc, comp = True, conj = True):
+    def syntax_iterators(self, doc, comp = True, use_conj = True):
         labels = [
             'prep',
             'dobj',
@@ -53,8 +56,17 @@ class OpinionMiner:
             'obj',
             'amod',
             'advcl',
-            'attr'
+            'attr',
+            'agent'
         ]
+
+        if self.left:
+            left_labels = [
+                'amod',
+                'advmod',
+                'attr'
+            ]
+            left_label = [doc.vocab.strings.add(label) for label in left_labels]
 
         # includes Complements in output?
         if comp:
@@ -66,7 +78,7 @@ class OpinionMiner:
                 ]
             )
         
-        if conj:
+        if use_conj:
             conj_labels = [
                 'conj',
                 'appos'
@@ -78,25 +90,39 @@ class OpinionMiner:
         conj = doc.vocab.strings.add("conj")
 
         def go_deeper(word):
+            ll = []
             rl = []
             for child in word.children:
-                if child.i <= word.i or child.dep not in np_deps:
-                    continue                    
-                r = go_deeper(child)
-
-                if conj and child.dep in conj_labels:
-                    # if child.pos in (VERB, AUX):
-                    #     continue
-                    if len([child for child in word.children if child.i > word.i and child.dep in np_deps]) == 1:
-                        rl.append([word])
+                if child.dep not in np_deps:
+                    continue
+                if child.i <= word.i:
+                    if not self.left: continue
+                    
+                    r = go_deeper(child)
                     for line in r:
-                        rl.append(line)
+                        # line2 = [word]
+                        # line2.extend(line)
+                        ll.append(line)
                 else:
-                    for line in r:
-                        line.extend([word])
-                        rl.append(line)
+                    r = go_deeper(child)
+                    if use_conj and child.dep in conj_labels:
+                        # if child.pos in (VERB, AUX):
+                        #     continue
+                        if len([child for child in word.children if child.i > word.i and child.dep in np_deps]) == 1:
+                            rl.append([word])
+                        for line in r:
+                            rl.append(line)
+                    else:
+                        for line in r:
+                            line.extend([word])
+                            rl.append(line)
             if not rl: rl.append([word])
-            return rl
+            if not ll: ll.append([])
+            final = []
+            for lli in ll:
+                for rli in rl:
+                    final.append(rli + lli)
+            return final
 
         vps = []
         for i, word in enumerate(doc):
@@ -108,11 +134,17 @@ class OpinionMiner:
             vps.extend(r)
         
         vps_with_opinion = []
-        for vp in vps:
-            for token in vp:
-                if token.lemma_ in self.opinion_lexicon:
-                    vps_with_opinion.append([token.text for token in vp][::-1])
-                    break
+        with self.nlp.select_pipes(enable=['tokenizer', 'lemmatizer']):
+            for vp in vps:
+                all_tokens = []
+                for token in vp[::-1]:
+                    all_tokens.extend(self.nlp(token.text))
+                opinion_words = []
+                for t in all_tokens:
+                    if t.lemma_ in self.opinion_lexicon:
+                        opinion_words.append(t.lemma_)
+                if opinion_words:
+                    vps_with_opinion.append(([token.text for token in all_tokens], opinion_words))
         
         return vps_with_opinion
     
@@ -133,11 +165,11 @@ if __name__ == '__main__':
     # start, end = sys.argv[1:]
     # start, end = int(start), int(end)
 
-    opinion_miner = OpinionMiner()
-    chunks_size_per_checkpoint = 60
+    opinion_miner = OpinionMiner(left=False)
+    chunks_size_per_checkpoint = 6000
     wiki = datasets.load_dataset("wikipedia", "20220301.en", split="train")
 
-    for i in range(0, 60, chunks_size_per_checkpoint):
+    for i in range(0, 144000, chunks_size_per_checkpoint):
         chunk = wiki[i: i+chunks_size_per_checkpoint]
         titles = chunk['title']
         paragraphs = []
@@ -145,4 +177,4 @@ if __name__ == '__main__':
             first_para = page.split('\n\n', 1)[0]
             paragraphs.append(first_para)
         
-        opinion_miner(paragraphs, titles, i, n_process=1)
+        opinion_miner(paragraphs, titles, i, n_process=3)
