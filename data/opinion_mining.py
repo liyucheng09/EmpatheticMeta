@@ -9,7 +9,8 @@ import threading
 from tqdm import tqdm
 from nltk.tokenize import sent_tokenize
 from pyopenie import OpenIE5
-
+import requests
+import time
 
 def get_first_few_paras(doc):
     paragraphs = doc.split('\n\n', 5)[:5]
@@ -20,6 +21,19 @@ def get_first_few_paras(doc):
         new_paras.append(para)
     return new_paras
 
+def wait_for_the_server():
+    count = 0
+    while count<400:
+        try:
+            requests.get('http://localhost:8000')
+            return
+        except requests.exceptions.ConnectionError:
+            # raise Exception('Check whether you have started the OpenIE5 server')
+            print('Server not ready')
+            count += 1
+            time.sleep(10)
+            continue
+    exit(0)
 
 class OpinionMiner:
     """
@@ -240,10 +254,12 @@ if __name__ == '__main__':
 
     chunks_size_per_thread = 613467
     chunks_size_per_checkpoint = 20000
-    wiki = datasets.load_dataset("wikipedia", "20220301.en", split="train")
+    wiki = datasets.load_dataset("wikipedia", "20220301.en", split="train", cache_dir = "/vol/research/lyc/EmpatheticMeta/wikipedia")
 
     start = 324000 + (chunks_size_per_thread*thread_id)
     end = start + chunks_size_per_thread
+
+    wait_for_the_server()
 
     for i in range(start, end, chunks_size_per_checkpoint):
         # opinion_miner = OpinionMiner(left=False)

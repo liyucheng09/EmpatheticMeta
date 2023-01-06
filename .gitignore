@@ -8,3 +8,8 @@ coreference/conll_jsonlines
 __pycache__
 data/wiki_opinion.backup
 # data/
+*.error
+*.out
+*.log
+wikipedia/
+htcondor/docker_stderror
