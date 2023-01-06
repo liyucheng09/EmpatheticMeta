@@ -1,3 +1,10 @@
 **/.DS_Store
 data/wiki_opinion
 **.pickle
+index/
+.vscode/
+coreference/conll-2012
+coreference/conll_jsonlines
+__pycache__
+data/wiki_opinion.backup
+# data/

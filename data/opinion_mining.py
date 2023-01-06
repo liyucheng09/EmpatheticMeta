@@ -5,6 +5,21 @@ import pickle
 from spacy.symbols import VERB, AUX
 import datasets
 import sys
+import threading
+from tqdm import tqdm
+from nltk.tokenize import sent_tokenize
+from pyopenie import OpenIE5
+
+
+def get_first_few_paras(doc):
+    paragraphs = doc.split('\n\n', 5)[:5]
+    new_paras = []
+    for i, para in enumerate(paragraphs):
+        if len(para) < 60 and i != 0:
+            break
+        new_paras.append(para)
+    return new_paras
+
 
 class OpinionMiner:
     """
@@ -12,7 +27,7 @@ class OpinionMiner:
     """
 
     def __init__(self, merge_noun_chunks = True, left = True):
-        self.nlp = spacy.load("en_core_web_sm")
+        self.nlp = spacy.load("en_core_web_sm", disable=['ner'])
         if merge_noun_chunks:
             self.nlp.add_pipe("merge_noun_chunks")
         self._load_opinion_lexicon()
@@ -136,45 +151,120 @@ class OpinionMiner:
         vps_with_opinion = []
         with self.nlp.select_pipes(enable=['tokenizer', 'lemmatizer']):
             for vp in vps:
-                all_tokens = []
-                for token in vp[::-1]:
-                    all_tokens.extend(self.nlp(token.text))
+                # all_tokens = []
+                # for token in vp[::-1]:
+                #     all_tokens.extend(self.nlp(token.lemma_))
                 opinion_words = []
-                for t in all_tokens:
+                # for t in all_tokens:
+                for t in vp:
                     if t.lemma_ in self.opinion_lexicon:
                         opinion_words.append(t.lemma_)
                 if opinion_words:
-                    vps_with_opinion.append(([token.text for token in all_tokens], opinion_words))
+                    vps_with_opinion.append(([token.lemma_ for token in vp[::-1]], opinion_words))
+                    # vps_with_opinion.append(([token.text for token in all_tokens], opinion_words))
         
         return vps_with_opinion
     
     def __call__(self, chunk, titles, id, n_process = 1):
         docs = self.nlp.pipe(chunk, n_process = n_process)
         output_opinions = {}
-        for title, doc in zip(titles, docs):
+        for title, doc in tqdm(zip(titles, docs)):
             opinions = self.syntax_iterators(doc)
             output_opinions[title] = opinions
         
-        output_path = f'data/wiki_opinion/checkpoint_{id}.pickle'
+        output_path = f'data/wiki_opinion_test/checkpoint_{id}.pickle'
         with open(output_path, 'wb') as f:
             pickle.dump(output_opinions, f)
         print(f'Opinion saved to {output_path}.')
 
+class OpenIEMiner:
+    """A python wapper for the Java OpenIE miner.
+    """
+    def __init__(self):
+        self.OpenIE = OpenIE5('http://localhost:8000')
+        self._load_opinion_lexicon()
+
+    def _load_opinion_lexicon(self):
+        cache_path = 'data/opinion_lexicon/opinion-words.pickle'
+
+        if os.path.exists(cache_path):
+            with open(cache_path, 'rb') as f:
+                self.opinion_lexicon = pickle.load(f)
+            return
+    
+    def __call__(self, chunk, titles, id, output_dir, n_process = 1):
+        output_opinions = {}
+        for title, para in tqdm(zip(titles, chunk)):
+            extractions = self._open_ie_miner(para)
+            output_opinions[title] = extractions
+        output_path = os.path.join(output_dir, f'checkpoint_{id}.pickle') 
+        with open(output_path, 'wb') as f:
+            pickle.dump(output_opinions, f)
+        print(f'Opinion saved to {output_path}.')
+
+    def _open_ie_miner(self, para):
+        sents = sent_tokenize(para)
+        triples = []
+        output = []
+        for sent in sents:
+            sent = sent.encode('ascii', errors = 'ignore').decode()
+            if len(sent)>240:
+                continue
+            for attempt in range(3):
+                try:
+                    triple = self.OpenIE.extract(sent)
+                except:
+                    continue
+                else:
+                    break
+            else:
+                continue
+            triples.extend(triple)
+        for line in triples:
+            confidence = line['confidence']
+            if confidence<0.8:
+                continue
+            triple = line['extraction']
+            arg1 = triple['arg1']['text']
+            rel = triple['rel']['text']
+            arg2s = [ i['text'] for i in triple['arg2s'] ]
+            triple = [arg1, rel] + arg2s
+            output.append(triple)
+        return output
+
+
 if __name__ == '__main__':
 
-    # start, end = sys.argv[1:]
-    # start, end = int(start), int(end)
+    thread_id, output_dir = sys.argv[1:]
+    thread_id = int(thread_id)
 
-    opinion_miner = OpinionMiner(left=False)
-    chunks_size_per_checkpoint = 6000
+    chunks_size_per_thread = 613467
+    chunks_size_per_checkpoint = 20000
     wiki = datasets.load_dataset("wikipedia", "20220301.en", split="train")
 
-    for i in range(0, 144000, chunks_size_per_checkpoint):
+    start = 324000 + (chunks_size_per_thread*thread_id)
+    end = start + chunks_size_per_thread
+
+    for i in range(start, end, chunks_size_per_checkpoint):
+        # opinion_miner = OpinionMiner(left=False)
+        opinion_miner = OpenIEMiner()
         chunk = wiki[i: i+chunks_size_per_checkpoint]
-        titles = chunk['title']
+        titles = []
         paragraphs = []
-        for page in chunk['text']:
-            first_para = page.split('\n\n', 1)[0]
-            paragraphs.append(first_para)
+        for title, page in zip(chunk['title'], chunk['text']):
+            if len(page) < 13000:
+                continue
+            titles.append(title)
+            paras = get_first_few_paras(page)
+            paragraphs.append('\n'.join(paras))
+        print('Number of doc in this batch: ', len(titles))
         
-        opinion_miner(paragraphs, titles, i, n_process=3)
+        # x = threading.Thread(target=threading_wrapper, args=(paragraphs, titles, i))
+        opinion_miner(paragraphs, titles, i, output_dir, n_process=1,)
+        # threads.append(x)
+        # print(f'thread id {i} starts.')
+        # x.start()
+    
+    # for i, x in enumerate(threads):
+    #     x.join()
+    #     print(f'thread id {i} ends.')
